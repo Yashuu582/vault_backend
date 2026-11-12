@@ -1,0 +1,95 @@
+# BalanceVault backend stack: PostgreSQL + Redis + FastAPI API.
+#
+# Run from the Backend folder:   docker compose up -d --build
+#
+# Everything is configured from Backend/.env:
+#   DB_PORT / DB_USER / DB_PASSWORD / DB_NAME   -> the PostgreSQL container and the API's connection
+#   REDIS_PORT                                  -> the Redis container
+# DB_PORT and REDIS_PORT are the ports on YOUR machine (e.g. 5433, 6379).
+# Inside Docker the API reaches the containers by name ("postgres", "redis") on their default ports.
+
+name: balancevault
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: balancevault-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?Set DB_USER in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-balancevault}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${DB_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [vault]
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: balancevault-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [vault]
+
+  backend:
+    build:
+      context: .
+    image: balancevault-backend:latest
+    container_name: balancevault-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      # Same user/password as the postgres container; host and port are the in-network ones.
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-balancevault}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (min 32 chars)}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-BalanceVault <no-reply@example.com>}
+      # Optional: first admin, created on start if it does not exist yet.
+      BV_ADMIN_USERNAME: ${BV_ADMIN_USERNAME:-admin}
+      BV_ADMIN_EMAIL: ${BV_ADMIN_EMAIL:-admin@example.com}
+      BV_ADMIN_NAME: ${BV_ADMIN_NAME:-Vault Admin}
+      BV_ADMIN_PASSWORD: ${BV_ADMIN_PASSWORD:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks: [vault]
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  vault:
+    driver: bridge
