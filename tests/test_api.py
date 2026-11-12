@@ -12,7 +12,7 @@ def register(c, email="holder@example.com"):
 
 
 def test_health(client):
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json()["status"] == "ok"
     r = client.get("/ready")
     assert r.status_code == 200
     assert r.json()["checks"]["database"] == "ok"

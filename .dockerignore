@@ -14,5 +14,4 @@ docker-compose.yml
 README.md
 .gitattributes
 .git/
-docker-compose.prod.yml
-Caddyfile
+.env.*

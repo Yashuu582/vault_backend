@@ -1,0 +1,169 @@
+# BalanceVault backend - CI/CD
+#
+#   Pull request -> main : test + migration check                       (nothing is deployed)
+#   Push to main         : test + migration check
+#                          -> alembic upgrade head on the production database (Neon)
+#                          -> trigger the Render deploy
+#                          -> wait until Render serves this exact commit, then smoke-test it
+#
+# One-time setup (see README "CI/CD"):
+#   Secrets   (Settings > Secrets and variables > Actions > Secrets):
+#     PRODUCTION_DATABASE_URL   Neon *direct* connection string (postgresql://...?sslmode=require)
+#     RENDER_DEPLOY_HOOK_URL    Render > service > Settings > Deploy Hook
+#   Variables (Settings > Secrets and variables > Actions > Variables):
+#     BACKEND_URL               e.g. https://vault-backend-91dx.onrender.com
+#   Render: Settings > Auto-Deploy = Off  (this workflow decides when to deploy)
+#   Optional: Settings > Environments > production > Required reviewers  (manual approval)
+
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  # Settings validation needs a JWT secret even for tests/migrations. Not used for anything real.
+  JWT_SECRET: ci-only-placeholder-secret-not-used-in-production-0123456789
+
+jobs:
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest -q
+
+  migrations:
+    name: Migrations (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: balancevault
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci -d balancevault"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://ci:ci@localhost:5432/balancevault
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Upgrade to head
+        run: alembic upgrade head
+
+      - name: Models and migrations agree (no pending autogenerate changes)
+        run: alembic check
+
+      - name: Downgrade to base and upgrade again (reversible migrations)
+        run: |
+          alembic downgrade base
+          alembic upgrade head
+          alembic current
+
+  deploy:
+    name: Migrate production DB + deploy to Render
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [test, migrations]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.BACKEND_URL }}
+    # Never run two production migrations/deploys at the same time.
+    concurrency:
+      group: backend-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check required settings
+        env:
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          missing=0
+          for name in PRODUCTION_DATABASE_URL RENDER_DEPLOY_HOOK_URL BACKEND_URL; do
+            if [ -z "${!name}" ]; then echo "::error::$name is not set (see the setup notes at the top of this file)"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Alembic upgrade head (production database)
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: |
+          echo "Before:"; alembic current
+          alembic upgrade head
+          echo "After:";  alembic current
+
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL" -o /dev/null
+          echo "Deploy requested for commit $GITHUB_SHA"
+
+      - name: Wait for the new version to be live
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          # Render builds the image, starts it and switches traffic. /health reports the running commit.
+          for attempt in $(seq 1 60); do
+            commit=$(curl -fsS --max-time 60 "$BACKEND_URL/health" 2>/dev/null | jq -r '.commit // empty' || true)
+            if [ "$commit" = "$GITHUB_SHA" ]; then
+              echo "Commit $GITHUB_SHA is live."
+              exit 0
+            fi
+            echo "[$attempt/60] running commit: ${commit:-unknown} - waiting..."
+            sleep 15
+          done
+          echo "::error::The new version did not go live within 15 minutes. Check the Render dashboard logs."
+          exit 1
+
+      - name: Smoke test
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          curl -fsS --max-time 60 "$BACKEND_URL/ready" | tee /dev/stderr | jq -e '.checks.database == "ok"'

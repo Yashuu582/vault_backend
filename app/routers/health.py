@@ -1,3 +1,5 @@
+import os
+
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -7,11 +9,15 @@ from ..rate_limit import limiter
 
 router = APIRouter(tags=["health"])
 
+# Render sets RENDER_GIT_COMMIT to the deployed commit SHA. The CI/CD pipeline compares it with
+# the commit it just deployed, to know the new version is really live. Other hosts: APP_COMMIT.
+DEPLOYED_COMMIT = os.environ.get("RENDER_GIT_COMMIT") or os.environ.get("APP_COMMIT") or None
+
 
 @router.get("/health")
 def health():
     """Liveness: the process is up and serving requests."""
-    return {"status": "ok"}
+    return {"status": "ok", "commit": DEPLOYED_COMMIT}
 
 
 @router.get("/ready")

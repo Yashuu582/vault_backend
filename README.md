@@ -3,7 +3,7 @@
 FastAPI API for BalanceVault: authentication, role-based access control, account onboarding and an
 append-only audit log. Data is stored in PostgreSQL (SQLAlchemy 2 + Alembic) and rate limits in Redis.
 
-The web app lives in a separate repository/folder (`Frontend`) and talks to this API over HTTP.
+This repository is standalone. The web app lives in its own repository ([valut_frontend](https://github.com/Yashuu582/valut_frontend)) and talks to this API only over HTTP.
 
 | Piece | Technology |
 |---|---|
@@ -82,6 +82,26 @@ API docs: http://localhost:8000/docs · Liveness: `/health` · Readiness: `/read
 
 `sql/db_roles.sql` is an optional hardening script for production servers. It creates separate least-privileged
 database users and is not needed for local development.
+
+## Deploy (Render + Neon, free)
+
+1. **Neon**: create a project and copy the **direct** connection string (connection pooling off).
+2. **Render** → New Web Service → this repository, branch `main`, runtime **Docker**, instance type **Free**,
+   health check path `/health`.
+3. Environment variables:
+
+   | Key | Value |
+   |---|---|
+   | `DATABASE_URL` | Neon connection string (`postgresql://…?sslmode=require` is accepted as-is) |
+   | `JWT_SECRET` | long random value, 32+ characters |
+   | `ENVIRONMENT` | `production` |
+   | `COOKIE_SECURE` | `true` |
+   | `FORWARDED_ALLOW_IPS` | `*` |
+   | `CORS_ORIGINS`, `FRONTEND_URL` | the frontend's public URL, e.g. `https://your-app.vercel.app` |
+   | `BV_ADMIN_USERNAME`, `BV_ADMIN_EMAIL`, `BV_ADMIN_PASSWORD` | first admin (strong password) |
+
+The container listens on `$PORT` (Render sets it), runs the migrations on start and creates the admin if missing.
+No Redis is needed for a single instance.
 
 ## Tests
 
